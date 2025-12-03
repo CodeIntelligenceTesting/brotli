@@ -68,3 +68,51 @@ brotli_java_test(
     srcs = ["TransformTest.java"],
     deps = TEST_DEPS,
 )
+
+java_test(
+    name = "decode_fuzz_test",
+    srcs = ["DecodeFuzzTest.java"],
+    args = ["--target_class=org.brotli.dec.DecodeFuzzTest"],
+    jvm_flags = ["-DBROTLI_ENABLE_ASSERTS=true"],
+    main_class = "com.code_intelligence.jazzer.Jazzer",
+    use_testrunner = False,
+    deps = [
+        ":dec",
+        "@maven//:com_code_intelligence_jazzer",
+        "@maven//:com_code_intelligence_jazzer_api",
+    ],
+)
+
+java_test(
+    name = "round_trip_fuzz_test",
+    srcs = ["RoundTripFuzzTest.java"],
+    args = ["--target_class=org.brotli.dec.RoundTripFuzzTest"],
+    data = ["//org/brotli/wrapper/enc:brotli_jni"],
+    jvm_flags = [
+        "-DBROTLI_ENABLE_ASSERTS=true",
+        "-DBROTLI_JNI_LIBRARY=$(location //org/brotli/wrapper/enc:brotli_jni)",
+    ],
+    main_class = "com.code_intelligence.jazzer.Jazzer",
+    use_testrunner = False,
+    deps = [
+        ":dec",
+        "//org/brotli/wrapper/enc:enc",
+        "@maven//:com_code_intelligence_jazzer",
+        "@maven//:com_code_intelligence_jazzer_api",
+    ],
+)
+
+java_test(
+    name = "diff_fuzz_test",
+    srcs = ["DiffFuzzTest.java"],
+    args = ["--target_class=org.brotli.dec.DiffFuzzTest"],
+    jvm_flags = ["-DBROTLI_ENABLE_ASSERTS=true"],
+    main_class = "com.code_intelligence.jazzer.Jazzer",
+    use_testrunner = False,
+    deps = [
+        ":dec",
+        "@maven//:com_code_intelligence_jazzer",
+        "@maven//:com_code_intelligence_jazzer_api",
+        "@maven//:org_apache_commons_commons_compress",
+    ],
+)
