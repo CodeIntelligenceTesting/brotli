@@ -59,6 +59,7 @@ final class State {
   int contextLookupOffset1;
   int contextLookupOffset2;
   int distanceCode;
+  int distanceContext;
   int numDirectDistanceCodes;
   int distancePostfixBits;
   int distance;

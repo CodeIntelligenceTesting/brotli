@@ -154,6 +154,8 @@ final class Decode {
   //  * distanceContext
   static final short[] CMD_LOOKUP = new short[NUM_COMMAND_CODES * 4];
 
+  private static final int[] CMD_CODE_CELL_POS = {0, 1, 0, 1, 8, 9, 2, 16, 10, 17, 18};
+
   static {
     unpackCommandLookupTable(CMD_LOOKUP);
   }
@@ -193,31 +195,30 @@ final class Decode {
   private static void unpackCommandLookupTable(short[] cmdLookup) {
     final int[] insertLengthOffsets = new int[24];
     final int[] copyLengthOffsets = new int[24];
+    insertLengthOffsets[0] = 0;
     copyLengthOffsets[0] = 2;
     for (int i = 0; i < 23; ++i) {
-      insertLengthOffsets[i + 1] = insertLengthOffsets[i] + (1 << (int) INSERT_LENGTH_N_BITS[i]);
-      copyLengthOffsets[i + 1] = copyLengthOffsets[i] + (1 << (int) COPY_LENGTH_N_BITS[i]);
+      insertLengthOffsets[i + 1] =
+          insertLengthOffsets[i] + (1 << (INSERT_LENGTH_N_BITS[i] & 0xFF));
+      copyLengthOffsets[i + 1] =
+          copyLengthOffsets[i] + (1 << (COPY_LENGTH_N_BITS[i] & 0xFF));
     }
 
     for (int cmdCode = 0; cmdCode < NUM_COMMAND_CODES; ++cmdCode) {
-      int rangeIdx = cmdCode >> 6;
-      /* -4 turns any regular distance code to negative. */
-      int distanceContextOffset = -4;
-      if (rangeIdx >= 2) {
-        rangeIdx -= 2;
-        distanceContextOffset = 0;
-      }
-      final int insertCode = (((0x29850 >> (rangeIdx * 2)) & 0x3) << 3) | ((cmdCode >> 3) & 7);
-      final int copyCode = (((0x26244 >> (rangeIdx * 2)) & 0x3) << 3) | (cmdCode & 7);
+      final int cellIndex = cmdCode >> 6;
+      final int cellPos = CMD_CODE_CELL_POS[cellIndex];
+      final int copyCode = ((cellPos << 3) & 0x18) | (cmdCode & 0x7);
       final int copyLengthOffset = copyLengthOffsets[copyCode];
-      final int distanceContext = distanceContextOffset + Utils.min(copyLengthOffset, 5) - 2;
+      final int insertCode = (cellPos & 0x18) | ((cmdCode >> 3) & 0x7);
       final int index = cmdCode * 4;
-      cmdLookup[index + 0] =
-          (short)
-              ((int) INSERT_LENGTH_N_BITS[insertCode] | ((int) COPY_LENGTH_N_BITS[copyCode] << 8));
+      cmdLookup[index] =
+          (short) ((INSERT_LENGTH_N_BITS[insertCode] & 0xFF)
+              | ((COPY_LENGTH_N_BITS[copyCode] & 0xFF) << 8));
       cmdLookup[index + 1] = (short) insertLengthOffsets[insertCode];
       cmdLookup[index + 2] = (short) copyLengthOffsets[copyCode];
-      cmdLookup[index + 3] = (short) distanceContext;
+      final int context = (copyLengthOffset > 4) ? 3 : (copyLengthOffset - 2);
+      final int distanceCode = (cellIndex >= 2) ? -1 : 0;
+      cmdLookup[index + 3] = (short) ((context << 8) | (distanceCode & 0xFF));
     }
   }
 
@@ -322,7 +323,7 @@ final class Decode {
     /* 6 trees + 1 extra "offset" slot to simplify table decoding logic. */
     s.blockTrees = new int[7 + 3 * (HUFFMAN_TABLE_SIZE_258 + HUFFMAN_TABLE_SIZE_26)];
     s.blockTrees[0] = 7;
-    s.distRbIdx = 3;
+    s.distRbIdx = 0;
     int result = calculateDistanceAlphabetLimit(s, MAX_ALLOWED_DISTANCE, 3, 15 << 3);
     if (result < BROTLI_OK) {
       return result;
@@ -1118,44 +1119,50 @@ final class Decode {
     if (s.distance > MAX_ALLOWED_DISTANCE) {
       return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
     }
-    final int address = s.distance - s.maxDistance - 1 - s.cdTotalSize;
-    if (address < 0) {
-      final int result = initializeCompoundDictionaryCopy(s, -address - 1, s.copyLength);
+    final int compoundDictionarySize = s.cdTotalSize;
+    final int distanceFromMax = s.distance - s.maxDistance;
+    if (compoundDictionarySize != 0
+        && distanceFromMax - 1 < compoundDictionarySize) {
+      final int address = compoundDictionarySize - distanceFromMax;
+      final int result = initializeCompoundDictionaryCopy(s, address, s.copyLength);
       if (result < BROTLI_OK) {
         return result;
       }
       s.runningState = COPY_FROM_COMPOUND_DICTIONARY;
-    } else {
-      // Force lazy dictionary initialization.
-      final ByteBuffer dictionaryData = Dictionary.getData();
-      final int wordLength = s.copyLength;
-      if (wordLength > Dictionary.MAX_DICTIONARY_WORD_LENGTH) {
-        return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
-      }
-      final int shift = Dictionary.sizeBits[wordLength];
-      if (shift == 0) {
-        return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
-      }
-      int offset = Dictionary.offsets[wordLength];
-      final int mask = (1 << shift) - 1;
-      final int wordIdx = address & mask;
-      final int transformIdx = address >> shift;
-      offset += wordIdx * wordLength;
-      final Transform.Transforms transforms = Transform.RFC_TRANSFORMS;
-      if (transformIdx >= transforms.numTransforms) {
-        return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
-      }
-      final int len = Transform.transformDictionaryWord(s.ringBuffer, s.pos, dictionaryData,
-          offset, wordLength, transforms, transformIdx);
-      s.pos += len;
-      s.metaBlockLength -= len;
-      if (s.pos >= fence) {
-        s.nextRunningState = MAIN_LOOP;
-        s.runningState = INIT_WRITE;
-        return BROTLI_OK;
-      }
-      s.runningState = MAIN_LOOP;
+      return BROTLI_OK;
     }
+
+    // Force lazy dictionary initialization.
+    final ByteBuffer dictionaryData = Dictionary.getData();
+    s.distRbIdx += s.distanceContext;
+    final int wordLength = s.copyLength;
+    final int address = distanceFromMax - 1 - compoundDictionarySize;
+    if (wordLength > Dictionary.MAX_DICTIONARY_WORD_LENGTH) {
+      return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
+    }
+    final int shift = Dictionary.sizeBits[wordLength];
+    if (shift == 0) {
+      return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
+    }
+    int offset = Dictionary.offsets[wordLength];
+    final int mask = (1 << shift) - 1;
+    final int wordIdx = address & mask;
+    final int transformIdx = address >> shift;
+    offset += wordIdx * wordLength;
+    final Transform.Transforms transforms = Transform.RFC_TRANSFORMS;
+    if (transformIdx >= transforms.numTransforms) {
+      return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
+    }
+    final int len = Transform.transformDictionaryWord(s.ringBuffer, s.pos, dictionaryData,
+        offset, wordLength, transforms, transformIdx);
+    s.pos += len;
+    s.metaBlockLength -= len;
+    if (s.pos >= fence) {
+      s.nextRunningState = MAIN_LOOP;
+      s.runningState = INIT_WRITE;
+      return BROTLI_OK;
+    }
+    s.runningState = MAIN_LOOP;
     return BROTLI_OK;
   }
 
@@ -1187,12 +1194,12 @@ final class Decode {
     while (address >= s.cdChunkOffsets[index + 1]) {
       index++;
     }
-    if (s.cdTotalSize > address + length) {
+    if (s.cdTotalSize < address + length) {
       return Utils.makeError(s, BROTLI_ERROR_INVALID_BACKWARD_REFERENCE);
     }
     /* Update the recent distances cache */
-    s.distRbIdx = (s.distRbIdx + 1) & 0x3;
-    s.rings[s.distRbIdx] = s.distance;
+    s.rings[s.distRbIdx & 0x3] = s.distance;
+    s.distRbIdx++;
     s.metaBlockLength -= length;
     s.cdBrIndex = index;
     s.cdBrOffset = address - s.cdChunkOffsets[index];
@@ -1304,8 +1311,10 @@ final class Decode {
           final int cmdCode = readSymbol(s.commandTreeGroup, s.commandTreeIdx, s) << 2;
           final int insertAndCopyExtraBits = (int) CMD_LOOKUP[cmdCode];
           final int insertLengthOffset = (int) CMD_LOOKUP[cmdCode + 1];
-          final int copyLengthOffset = (int) CMD_LOOKUP[cmdCode + 2];
-          s.distanceCode = (int) CMD_LOOKUP[cmdCode + 3];
+          final int copyLengthOffset = CMD_LOOKUP[cmdCode + 2] & 0xFFFF;
+          final int distanceInfo = CMD_LOOKUP[cmdCode + 3] & 0xFFFF;
+          s.distanceCode = (byte) distanceInfo;
+          s.distanceContext = (distanceInfo >>> 8) & 0xFF;
           BitReader.fillBitWindow(s);
           {
             final int insertLengthExtraBits = insertAndCopyExtraBits & 0xFF;
@@ -1384,9 +1393,29 @@ final class Decode {
             continue;
           }
           int distanceCode = s.distanceCode;
-          if (distanceCode < 0) {
-            // distanceCode in untouched; assigning it 0 won't affect distance ring buffer rolling.
-            s.distance = s.rings[s.distRbIdx];
+          if (distanceCode >= 0) {
+            final int offset = distanceCode - 3;
+            if (distanceCode <= 3) {
+              s.distanceContext = 1 >> distanceCode;
+              s.distance = s.rings[(s.distRbIdx - offset) & 0x3];
+              s.distRbIdx -= s.distanceContext;
+            } else {
+              int indexDelta = 3;
+              int base = distanceCode - 10;
+              if (distanceCode < 10) {
+                base = distanceCode - 4;
+              } else {
+                indexDelta = 2;
+              }
+              final int delta = ((0x605142 >> (4 * base)) & 0xF) - 3;
+              s.distance = s.rings[(s.distRbIdx + indexDelta) & 0x3] + delta;
+              if (s.distance <= 0) {
+                s.distance = Integer.MAX_VALUE;
+              }
+              s.distanceContext = 0;
+            }
+            s.distanceCode = s.distance;
+            distanceCode = s.distance;
           } else {
             if (s.halfOffset > BitReader.HALF_WATERLINE) {
               result = BitReader.readMoreInput(s);
@@ -1400,14 +1429,29 @@ final class Decode {
             s.distanceBlockLength--;
             BitReader.fillBitWindow(s);
             final int distTreeIdx =
-                (int) s.distContextMap[s.distContextMapSlice + distanceCode] & 0xFF;
+                (int) s.distContextMap[s.distContextMapSlice + s.distanceContext] & 0xFF;
             distanceCode = readSymbol(s.distanceTreeGroup, distTreeIdx, s);
             if (distanceCode < NUM_DISTANCE_SHORT_CODES) {
-              final int index =
-                  (s.distRbIdx + DISTANCE_SHORT_CODE_INDEX_OFFSET[distanceCode]) & 0x3;
-              s.distance = s.rings[index] + DISTANCE_SHORT_CODE_VALUE_OFFSET[distanceCode];
-              if (s.distance < 0) {
-                return Utils.makeError(s, BROTLI_ERROR_NEGATIVE_DISTANCE);
+              if (distanceCode <= 3) {
+                final int offset = distanceCode - 3;
+                final int currentRbIdx = s.distRbIdx;
+                final int rbIndex = (currentRbIdx - offset) & 0x3;
+                s.distance = s.rings[rbIndex];
+                s.distanceContext = 1 >> distanceCode;
+                s.distRbIdx = currentRbIdx - s.distanceContext;
+              } else {
+                int indexDelta = 3;
+                int base = distanceCode - 10;
+                if (distanceCode < 10) {
+                  base = distanceCode - 4;
+                } else {
+                  indexDelta = 2;
+                }
+                final int delta = ((0x605142 >> (4 * base)) & 0xF) - 3;
+                s.distance = s.rings[(s.distRbIdx + indexDelta) & 0x3] + delta;
+                if (s.distance <= 0) {
+                  s.distance = Integer.MAX_VALUE;
+                }
               }
             } else {
               final int extraBits = (int) s.distExtraBits[distanceCode];
@@ -1419,7 +1463,10 @@ final class Decode {
                 bits = BitReader.readBits(s, extraBits);
               }
               s.distance = s.distOffset[distanceCode] + (bits << s.distancePostfixBits);
+              s.distanceContext = 0;
             }
+            s.distanceCode = s.distance;
+            distanceCode = s.distance;
           }
 
           if (s.maxDistance != s.maxBackwardDistance
@@ -1435,8 +1482,8 @@ final class Decode {
           }
 
           if (distanceCode > 0) {
-            s.distRbIdx = (s.distRbIdx + 1) & 0x3;
-            s.rings[s.distRbIdx] = s.distance;
+            s.rings[s.distRbIdx & 0x3] = s.distanceCode;
+            s.distRbIdx++;
           }
 
           if (s.copyLength > s.metaBlockLength) {
