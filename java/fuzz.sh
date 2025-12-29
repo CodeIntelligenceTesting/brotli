@@ -1,29 +1,54 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 set -eu
 
+BAZEL_SAN_FLAGS=(
+  --repo_env=CC=clang
+  --repo_env=CXX=clang++
+  --copt=-fsanitize=address
+  --copt=-fsanitize=fuzzer-no-link
+  --copt=-fno-omit-frame-pointer
+  --copt=-fno-stack-protector
+  --copt=-U_FORTIFY_SOURCE
+  --copt=-D_FORTIFY_SOURCE=0
+  --copt=-g
+  --linkopt=-fsanitize=address
+  --linkopt=-fsanitize=fuzzer-no-link
+  --linkopt=-shared-libasan
+  --strip=never
+)
+
+run_bazel() {
+  local subcommand=$1
+  shift
+  bazel "$subcommand" "${BAZEL_SAN_FLAGS[@]}" "$@"
+}
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$SCRIPT_DIR"
+
+# Build instrumented brotli lib
+run_bazel build //:brotli_jni.dll
 
 COVERAGE_DIR="$SCRIPT_DIR/coverage"
 mkdir -p "$COVERAGE_DIR"
 find "$COVERAGE_DIR" -maxdepth 1 -name '*.lcov.dat' -type f -delete
 rm -f "$COVERAGE_DIR/lcov.info"
 
-TARGETS=$(bazel query 'kind("java_test", filter("fuzz", //org/brotli/dec:all))')
-if [ -z "$TARGETS" ]; then
-  echo "No fuzz tests found under //org/brotli/dec" >&2
-  exit 1
-fi
+TARGETS=(
+  //org/brotli/dec:decode_fuzz_test
+  //org/brotli/dec:round_trip_fuzz_test
+  //org/brotli/dec:diff_fuzz_test
+)
 
 # Run fuzz tests
-for target in $TARGETS; do
+for target in "${TARGETS[@]}"; do
   name=${target##*:}
   corpus_dir="corpus/$name"
   mkdir -p "$corpus_dir"
   echo ""
   echo "Running $target with corpus $corpus_dir"
-  bazel run "$target" -- "$(realpath "$corpus_dir")" -max_total_time=6
+  run_bazel run "$target" -- --asan "$(realpath "$corpus_dir")" -max_total_time=99999
 
   echo ""
   echo "Collecting coverage for $target"
@@ -45,6 +70,7 @@ done
 dat_files=$(find "$COVERAGE_DIR" -maxdepth 1 -name '*.lcov.dat' -type f | sort)
 combined="lcov.info"
 
+# Get coverage
 echo ""
 echo "Merging LCOV traces into $combined"
 rm -f "$combined"
@@ -56,4 +82,3 @@ rm -f "$combined"
   set -- "$@" --output-file "$combined"
   "$@"
 )
-

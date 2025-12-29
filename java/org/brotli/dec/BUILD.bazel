@@ -95,7 +95,10 @@ java_test(
     main_class = "com.code_intelligence.jazzer.Jazzer",
     use_testrunner = False,
     deps = [
+        "//org/brotli/enc:prepared_dictionary",
+        "//org/brotli/common:shared_dictionary",
         ":dec",
+        "//org/brotli/wrapper/common",
         "//org/brotli/wrapper/enc:enc",
         "@maven//:com_code_intelligence_jazzer",
         "@maven//:com_code_intelligence_jazzer_api",
@@ -114,5 +117,38 @@ java_test(
         "@maven//:com_code_intelligence_jazzer",
         "@maven//:com_code_intelligence_jazzer_api",
         "@maven//:org_apache_commons_commons_compress",
+    ],
+)
+
+java_test(
+    name = "buffer_reuse_fuzz_test",
+    srcs = ["BufferReuseFuzzTest.java"],
+    args = ["--target_class=org.brotli.dec.BufferReuseFuzzTest"],
+    jvm_flags = ["-DBROTLI_ENABLE_ASSERTS=true"],
+    main_class = "com.code_intelligence.jazzer.Jazzer",
+    use_testrunner = False,
+    deps = [
+        ":dec",
+        "@maven//:com_code_intelligence_jazzer",
+        "@maven//:com_code_intelligence_jazzer_api",
+    ],
+)
+
+java_test(
+    name = "encode_fuzz_test",
+    srcs = ["EncodeFuzzTest.java"],
+    args = ["--target_class=org.brotli.dec.EncodeFuzzTest"],
+    data = ["//org/brotli/wrapper/enc:brotli_jni"],
+    jvm_flags = [
+        "-DBROTLI_ENABLE_ASSERTS=true",
+        "-DBROTLI_JNI_LIBRARY=$(location //org/brotli/wrapper/enc:brotli_jni)",
+    ],
+    main_class = "com.code_intelligence.jazzer.Jazzer",
+    use_testrunner = False,
+    deps = [
+        ":dec",
+        "//org/brotli/wrapper/enc:enc",
+        "@maven//:com_code_intelligence_jazzer",
+        "@maven//:com_code_intelligence_jazzer_api",
     ],
 )
