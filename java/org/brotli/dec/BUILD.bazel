@@ -70,6 +70,17 @@ brotli_java_test(
 )
 
 java_test(
+    name = "RoundTripReproducerTest",
+    srcs = ["RoundTripReproducerTest.java"],
+    jvm_flags = [
+        "-DBROTLI_ENABLE_ASSERTS=true",
+        "-DBROTLI_32_BIT_CPU=false",
+    ],
+    test_class = "org.brotli.dec.RoundTripReproducerTest",
+    deps = TEST_DEPS,
+)
+
+java_test(
     name = "decode_fuzz_test",
     srcs = ["DecodeFuzzTest.java"],
     args = ["--target_class=org.brotli.dec.DecodeFuzzTest"],
